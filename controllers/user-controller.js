@@ -1,163 +1,149 @@
-const User = require("../model/User");
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const signup = async (req, res, next) => {
-  const { name, email, password } = req.body;
-  let existingUser;
-  try {
-    existingUser = await User.findOne({ email: email });
-  } catch (err) {
-    console.log(err);
-  }
-  if (existingUser) {
-    return res
-      .status(400)
-      .json({ message: "User already exists! Login Instead" });
-  }
-  const hashedPassword = bcrypt.hashSync(password);
-  const user = new User({
-    name,
-    email,
-    password: hashedPassword,
-  });
+const userService = require('../service/user-service')
+const taskService = require('../service/task-service')
+const ApiError = require('../exceptions/api-error')
 
-  try {
-    await user.save();
-  } catch (err) {
-    console.log(err);
-  }
-  return res.status(201).json({ message: user });
-};
+class UserTaskController {
+  async login(req, res, next) {
+    try {
+      const { user, password } = req.body
 
-const login = async (req, res, next) => {
-  const { email, password } = req.body;
+      const { accessToken, refreshToken } = await userService.login(
+        user,
+        password,
+      )
 
-  let existingUser;
-  try {
-    existingUser = await User.findOne({ email: email });
-  } catch (err) {
-    return new Error(err);
-  }
-  if (!existingUser) {
-    return res.status(400).json({ message: "User not found. Signup Please" });
-  }
-  const isPasswordCorrect = bcrypt.compareSync(password, existingUser.password);
-  if (!isPasswordCorrect) {
-    return res.status(400).json({ message: "Inavlid Email / Password" });
-  }
-  const token = jwt.sign({ id: existingUser._id }, process.env.JWT_SECRET_KEY, {
-    expiresIn: "7d",
-  });
-
-  console.log("Generated Token\n", token);
-
-  if (req.cookies[`${existingUser._id}`]) {
-    req.cookies[`${existingUser._id}`] = "";
-  }
-
-  res.cookie(String(existingUser._id), token, {
-    path: "/",
-    expires: new Date(Date.now() + 1000 * 3600), // 30 seconds
-    httpOnly: true,
-    samesite: "None",
-    Secure: true,
-  });
-
-  return res
-    .status(200)
-    .json({ message: "Successfully Logged In", user: existingUser, token });
-};
-
-const verifyToken = (req, res, next) => {
-  const cookies = req.headers.cookie;
-  if (!cookies) {
-    return res.status(400).json({ message: "No cookie found logging out" });
-  } else {
-    const token = cookies.split("=")[1];
-    if (!token) {
-      res.status(404).json({ message: "No token found" });
-    }
-    jwt.verify(String(token), process.env.JWT_SECRET_KEY, (err, user) => {
-      if (err) {
-        return res.status(400).json({ message: "Invalid TOken" });
-      }
-      console.log(user.id);
-      req.id = user.id;
-    });
-  }
-
-  next();
-};
-
-const getUser = async (req, res, next) => {
-  const userId = req.id;
-  let user;
-  try {
-    user = await User.findById(userId, "-password");
-  } catch (err) {
-    return new Error(err);
-  }
-  if (!user) {
-    return res.status(404).json({ messsage: "User Not FOund" });
-  }
-  return res.status(200).json({ user });
-};
-
-const refreshToken = (req, res, next) => {
-  const cookies = req.headers.cookie;
-  console.log("req.headers.cookie", req.headers.cookie);
-  const prevToken = cookies.split("=")[1];
-  if (!prevToken) {
-    return res.status(400).json({ message: "Couldn't find token" });
-  }
-  jwt.verify(String(prevToken), process.env.JWT_SECRET_KEY, (err, user) => {
-    if (err) {
-      console.log("prevToken", prevToken);
-      console.log(err);
-      return res.status(403).json({ message: "Authentication failed" });
-    } else {
-      res.clearCookie(`${user.id}`);
-      req.cookies[`${user.id}`] = "";
-
-      const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET_KEY, {
-        expiresIn: "7d",
-      });
-      console.log("Regenerated Token\n", token);
-
-      res.cookie(String(user.id), token, {
-        path: "/",
-        expires: new Date(Date.now() + 1000 * 3600), // 30 seconds
+      res.cookie('refreshToken', refreshToken, {
+        maxAge: 30 * 24 * 60 * 60 * 1000,
         httpOnly: true,
-        sameSite: "lax",
-      });
+      })
 
-      req.id = user.id;
+      return res.json({ accessToken })
+    } catch (e) {
+      next(e)
     }
-
-    next();
-  });
-};
-
-const logout = (req, res, next) => {
-  const cookies = req.headers.cookie;
-  const prevToken = cookies.split("=")[1];
-  if (!prevToken) {
-    return res.status(400).json({ message: "Couldn't find token" });
   }
-  jwt.verify(String(prevToken), process.env.JWT_SECRET_KEY, (err, user) => {
-    if (err) {
-      console.log(err);
-      return res.status(403).json({ message: "Authentication failed" });
-    }
-    res.clearCookie(`${user.id}`);
-    req.cookies[`${user.id}`] = "";
-    return res.status(200).json({ message: "Successfully Logged Out" });
-  });
-};
 
-exports.logout = logout;
-exports.signup = signup;
-exports.login = login;
-exports.verifyToken = verifyToken;
-exports.getUser = getUser;
-exports.refreshToken = refreshToken;
+  async logout(req, res, next) {
+    try {
+      const { refreshToken } = req.cookies
+
+      const token = await userService.logout(refreshToken)
+      res.clearCookie('refreshToken')
+      return res.json(token)
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async activate(req, res, next) {
+    try {
+      const activationLink = req.params.link
+
+      await userService.activate(activationLink)
+      return res.redirect(process.env.CLIENT_URL)
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async refresh(req, res, next) {
+    try {
+      const { refreshToken } = req.cookies
+
+      const userData = await userService.refresh(refreshToken)
+      res.cookie('refreshToken', userData.refreshToken, {
+        maxAge: 30 * 24 * 60 * 60 * 1000,
+        httpOnly: true,
+      })
+      return res.json(userData)
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async getTasks(req, res, next) {
+    try {
+      let { page, amount, name, email } = req.query
+
+      const data = await taskService.getTasks(page, amount, name, email)
+      return res.json(data)
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async getCount(req, res, next) {
+    try {
+      const data = await taskService.getCount()
+
+      return res.json(data)
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async setTasks(req, res, next) {
+    try {
+      const { email, name, task } = req.body
+
+      const data = await taskService.setTasks(email, name, task)
+
+      return res.json(data)
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async isValidToken(req, res, next) {
+    try {
+      const { id } = req.user
+      if (id) {
+        return res.json({ user: 'Authorization is correct' })
+      } else {
+        throw ApiError.BadRequest('You are not an admin')
+      }
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async updateUserStatus(req, res, next) {
+    try {
+      const { id } = req.params
+      const { status } = req.body
+
+      const data = await taskService.updateUserStatus(id, status)
+
+      return res.json({ data })
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async deleteUserTaskData(req, res, next) {
+    try {
+      const { id } = req.params
+
+      const data = await taskService.deleteUserTaskData(id)
+
+      return res.json({ data })
+    } catch (e) {
+      next(e)
+    }
+  }
+
+  async updateUserTask(req, res, next) {
+    try {
+      const { id } = req.params
+      const { task } = req.body
+
+      const data = await taskService.updateUserTask(id, task)
+      
+      return res.json({ data })
+    } catch (e) {
+      next(e)
+    }
+  }
+}
+
+module.exports = new UserTaskController()
